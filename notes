@@ -1,0 +1,1 @@
+-BimPath "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/model/Wealth.bim" -Environment "$(Environment)" -SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)"
