@@ -5,3 +5,12 @@ release -
 -SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -DatasourcesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/datasources/$(Environment).yml"
 test  -
 -SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -DatasourcesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/datasources/$(Environment).yml" -DryRun
+
+
+Roles:----
+
+Release:
+-SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -Environment "$(Environment)" -RolesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/roles/dev.yml"
+
+Test:
+-SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -Environment "$(Environment)" -RolesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/roles/dev.yml" -DryRun
