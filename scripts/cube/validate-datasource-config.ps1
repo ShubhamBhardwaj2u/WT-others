@@ -34,6 +34,7 @@ function Write-Log {
         [string]$Level = "INFO"
     )
 
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $color = $Colors.White
 
     switch ($Level) {
@@ -60,14 +61,14 @@ function Add-ValidationError {
     param([string]$Message)
 
     $script:ValidationErrors += $Message
-    Write-Log $Message "ERROR"
+    Write-Log "ERROR: $Message" -Level "ERROR"
 }
 
 function Add-ValidationWarning {
     param([string]$Message)
 
     $script:ValidationWarnings += $Message
-    Write-Log $Message "WARNING"
+    Write-Log "WARNING: $Message" -Level "WARNING"
 }
 
 function Initialize-YamlModule {
@@ -76,11 +77,11 @@ function Initialize-YamlModule {
     try {
         if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
             Install-Module -Name powershell-yaml -Scope CurrentUser -Force -ErrorAction Stop
-            Write-Log "Installed powershell-yaml module" "SUCCESS"
+            Write-Log "Installed powershell-yaml module" -Level "SUCCESS"
         }
 
         Import-Module -Name powershell-yaml -Force -ErrorAction Stop
-        Write-Log "Loaded powershell-yaml module" "SUCCESS"
+        Write-Log "Loaded powershell-yaml module" -Level "SUCCESS"
         return $true
     }
     catch {
@@ -181,9 +182,9 @@ function Read-DatasourceConfig {
             return $null
         }
 
-        Write-Log "Datasource YAML validated successfully" "SUCCESS"
-        Write-Log "Environment: $($yaml.environment)" "INFO"
-        Write-Log "Datasources found in YAML: $($yaml.datasources.Count)" "INFO"
+        Write-Log "Datasource YAML validated successfully" -Level "SUCCESS"
+        Write-Log "Environment: $($yaml.environment)" -Level "INFO"
+        Write-Log "Datasources found in YAML: $($yaml.datasources.Count)" -Level "INFO"
 
         return $yaml
     }
@@ -223,7 +224,7 @@ function Test-DatasourceSync {
         return $false
     }
 
-    Write-Log "Datasource names are in sync between BIM and YAML" "SUCCESS"
+    Write-Log "Datasource names are in sync between BIM and YAML" -Level "SUCCESS"
     return $true
 }
 
@@ -233,7 +234,7 @@ function Test-DatasourceConfigValues {
     Write-Section "Step 5: Datasource Value Validation"
 
     foreach ($ds in $Yaml.datasources) {
-        Write-Log "Validating datasource: $($ds.name)" "INFO"
+        Write-Log "Validating datasource: $($ds.name)" -Level "INFO"
 
         if ($ds.server -match "localhost|127\.0\.0\.1") {
             Add-ValidationError "Datasource '$($ds.name)' points to local server '$($ds.server)'. This is not allowed for shared environments."
@@ -247,7 +248,7 @@ function Test-DatasourceConfigValues {
             Add-ValidationWarning "UAT datasource '$($ds.name)' server value looks development-like: $($ds.server)"
         }
 
-        Write-Log "Datasource '$($ds.name)' validated" "SUCCESS"
+        Write-Log "Datasource '$($ds.name)' validated" -Level "SUCCESS"
     }
 
     return $true
@@ -255,10 +256,10 @@ function Test-DatasourceConfigValues {
 
 Write-Section "SSAS Datasource Configuration Validation"
 
-Write-Log "BIM Path: $BimPath" "INFO"
-Write-Log "Datasource Config File: $DatasourcesConfigFile" "INFO"
-Write-Log "Environment: $Environment" "INFO"
-Write-Log "Strict Mode: $StrictMode" "INFO"
+Write-Log "BIM Path: $BimPath" -Level "INFO"
+Write-Log "Datasource Config File: $DatasourcesConfigFile" -Level "INFO"
+Write-Log "Environment: $Environment" -Level "INFO"
+Write-Log "Strict Mode: $StrictMode" -Level "INFO"
 
 if (-not (Initialize-YamlModule)) {
     exit 1
@@ -280,7 +281,7 @@ Test-DatasourceConfigValues -Yaml $yaml | Out-Null
 Write-Section "Validation Results"
 
 if ($script:ValidationErrors.Count -gt 0) {
-    Write-Log "Datasource validation FAILED with $($script:ValidationErrors.Count) error(s)." "ERROR"
+    Write-Log "Datasource validation FAILED with $($script:ValidationErrors.Count) error(s)." -Level "ERROR"
 
     Write-Host ""
     Write-Host "ERRORS:" -ForegroundColor $Colors.Red
@@ -292,7 +293,7 @@ if ($script:ValidationErrors.Count -gt 0) {
 }
 
 if ($script:ValidationWarnings.Count -gt 0 -and $StrictMode) {
-    Write-Log "Datasource validation FAILED because StrictMode treats warnings as errors." "ERROR"
+    Write-Log "Datasource validation FAILED because StrictMode treats warnings as errors." -Level "ERROR"
 
     Write-Host ""
     Write-Host "WARNINGS:" -ForegroundColor $Colors.Yellow
@@ -304,7 +305,7 @@ if ($script:ValidationWarnings.Count -gt 0 -and $StrictMode) {
 }
 
 if ($script:ValidationWarnings.Count -gt 0) {
-    Write-Log "Datasource validation PASSED with $($script:ValidationWarnings.Count) warning(s)." "WARNING"
+    Write-Log "Datasource validation PASSED with $($script:ValidationWarnings.Count) warning(s)." -Level "WARNING"
 
     Write-Host ""
     Write-Host "WARNINGS:" -ForegroundColor $Colors.Yellow
@@ -313,7 +314,7 @@ if ($script:ValidationWarnings.Count -gt 0) {
     }
 }
 else {
-    Write-Log "Datasource validation PASSED - no errors or warnings." "SUCCESS"
+    Write-Log "Datasource validation PASSED - no errors or warnings." -Level "SUCCESS"
 }
 
 Write-Host ""
