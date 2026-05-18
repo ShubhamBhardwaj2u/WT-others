@@ -14,31 +14,51 @@ param(
     [string]$DatabaseName,
 
     [Parameter(Mandatory=$false)]
+    [ValidateSet("true", "false")]
+    [string]$CreateDatabaseIfNotExists = "true",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$VerboseLogging,
+
+    [Parameter(Mandatory=$false)]
     [switch]$WhatIf
 )
+
+$CreateDatabaseIfNotExistsBool = [System.Convert]::ToBoolean($CreateDatabaseIfNotExists)
 
 $ErrorActionPreference = "Stop"
 $script:DeploymentStartTime = Get-Date
 $script:Errors = @()
+$script:Warnings = @()
 $script:ChangesMade = @()
 
+if ($VerboseLogging) {
+    $VerbosePreference = "Continue"
+}
+
 $Colors = @{
-    Red   = [ConsoleColor]::Red
-    Green = [ConsoleColor]::Green
-    Cyan  = [ConsoleColor]::Cyan
-    White = [ConsoleColor]::White
-    Yellow = [ConsoleColor]::Yellow
+    Red      = [ConsoleColor]::Red
+    Yellow   = [ConsoleColor]::Yellow
+    Green    = [ConsoleColor]::Green
+    Cyan     = [ConsoleColor]::Cyan
+    White    = [ConsoleColor]::White
+    DarkGray = [ConsoleColor]::DarkGray
 }
 
 function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
 
     $color = $Colors.White
+
     switch ($Level) {
         "ERROR"   { $color = $Colors.Red }
-        "SUCCESS" { $color = $Colors.Green }
         "WARNING" { $color = $Colors.Yellow }
+        "SUCCESS" { $color = $Colors.Green }
         "INFO"    { $color = $Colors.Cyan }
+        "DEBUG"   { $color = $Colors.DarkGray }
     }
 
     Write-Host "[$Level] $Message" -ForegroundColor $color
@@ -54,7 +74,10 @@ function Write-Section {
 }
 
 function Write-Step {
-    param([string]$Step, [string]$Description)
+    param(
+        [string]$Step,
+        [string]$Description
+    )
 
     Write-Host ""
     Write-Host "$Step - $Description" -ForegroundColor $Colors.White
@@ -64,31 +87,38 @@ function Add-Error {
     param([string]$Message)
 
     $script:Errors += $Message
-    Write-Log $Message "ERROR"
+    Write-Log $Message -Level "ERROR"
+}
+
+function Add-Warning {
+    param([string]$Message)
+
+    $script:Warnings += $Message
+    Write-Log $Message -Level "WARNING"
 }
 
 function Initialize-AnalysisServicesLibraries {
-    Write-Section "Loading Analysis Services Libraries"
+    Write-Section "Analysis Services Library Initialization"
 
     $coreDll = "C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Microsoft.AnalysisServices.Core.dll"
     $tabularDll = "C:\Program Files\Microsoft SQL Server Management Studio 22\Release\Common7\IDE\Microsoft.AnalysisServices.Tabular.dll"
 
     if (-not (Test-Path $coreDll)) {
-        Add-Error "Core DLL not found: $coreDll"
+        Add-Error "Analysis Services Core library not found: $coreDll"
         return $false
     }
 
     if (-not (Test-Path $tabularDll)) {
-        Add-Error "Tabular DLL not found: $tabularDll"
+        Add-Error "Analysis Services Tabular library not found: $tabularDll"
         return $false
     }
 
     try {
         Add-Type -Path $coreDll -ErrorAction Stop
-        Write-Log "Loaded Core DLL: $coreDll" "SUCCESS"
+        Write-Log "Analysis Services Core library loaded from: $coreDll" -Level "SUCCESS"
 
         Add-Type -Path $tabularDll -ErrorAction Stop
-        Write-Log "Loaded Tabular DLL: $tabularDll" "SUCCESS"
+        Write-Log "Analysis Services Tabular library loaded from: $tabularDll" -Level "SUCCESS"
 
         return $true
     }
@@ -101,7 +131,7 @@ function Initialize-AnalysisServicesLibraries {
 function Get-DatabaseFromBim {
     param([string]$Path)
 
-    Write-Step "2" "Reading BIM File"
+    Write-Step "2" "Deserializing BIM Model"
 
     try {
         $json = Get-Content $Path -Raw -Encoding UTF8
@@ -111,11 +141,15 @@ function Get-DatabaseFromBim {
             throw "BIM deserialization returned null."
         }
 
-        Write-Log "BIM deserialized successfully. Source database name: $($database.Name)" "SUCCESS"
+        if ($null -eq $database.Model) {
+            throw "BIM file does not contain a valid model object."
+        }
+
+        Write-Log "BIM model deserialized successfully: $($database.Name)" -Level "SUCCESS"
         return $database
     }
     catch {
-        Add-Error "Failed to read BIM file: $($_.Exception.Message)"
+        Add-Error "Failed to deserialize BIM file: $($_.Exception.Message)"
         throw
     }
 }
@@ -131,8 +165,8 @@ function Update-DatabaseIdentity {
     $Database.Name = $Name
     $Database.ID = $Name
 
-    Write-Log "Target database name set to: $Name" "SUCCESS"
-    $script:ChangesMade += "Database identity set to $Name"
+    Write-Log "Database identity set to: $Name" -Level "SUCCESS"
+    $script:ChangesMade += "Database identity updated to: $Name"
 }
 
 function Connect-SsasServer {
@@ -143,14 +177,17 @@ function Connect-SsasServer {
     $server = New-Object Microsoft.AnalysisServices.Tabular.Server
 
     try {
-        Write-Log "Connecting to SSAS server: $ServerName"
+        Write-Log "Connecting to SSAS server: $ServerName" -Level "INFO"
         $server.Connect($ServerName)
 
         if (-not $server.Connected) {
-            throw "Connection established but server is not connected."
+            throw "Connection established but server is not in connected state."
         }
 
-        Write-Log "Connected to SSAS server: $ServerName" "SUCCESS"
+        Write-Log "Connected to SSAS server: $ServerName" -Level "SUCCESS"
+        Write-Log "Server Version: $($server.Version)" -Level "INFO"
+        Write-Log "Server Edition: $($server.Edition)" -Level "INFO"
+
         return $server
     }
     catch {
@@ -159,14 +196,37 @@ function Connect-SsasServer {
     }
 }
 
-function Deploy-Database {
+function Test-DatabaseDeploymentAllowed {
+    param(
+        [object]$Server,
+        [string]$Name
+    )
+
+    Write-Step "5" "Validating Target Database"
+
+    $Server.Databases.Refresh()
+    $existingDatabase = $Server.Databases.FindByName($Name)
+
+    if ($null -eq $existingDatabase) {
+        if (-not $CreateDatabaseIfNotExistsBool) {
+            throw "Database '$Name' does not exist and CreateDatabaseIfNotExists is set to false."
+        }
+
+        Write-Log "Database '$Name' does not exist. It will be created." -Level "WARNING"
+        return
+    }
+
+    Write-Log "Database '$Name' already exists. It will be replaced." -Level "WARNING"
+}
+
+function Invoke-DatabaseDeployment {
     param(
         [object]$Server,
         [object]$Database,
         [string]$Name
     )
 
-    Write-Step "5" "Deploying BIM to SSAS"
+    Write-Step "6" "Deploying BIM Database"
 
     try {
         $databaseJson = [Microsoft.AnalysisServices.Tabular.JsonSerializer]::SerializeDatabase($Database)
@@ -185,29 +245,29 @@ function Deploy-Database {
         } | ConvertTo-Json -Depth 100
 
         if ($WhatIf) {
-            Write-Log "[WHATIF] Would deploy database '$Name' to server '$SsasServer'" "WARNING"
+            Write-Log "[WHATIF] Would execute TMSL createOrReplace for database: $Name" -Level "WARNING"
             return $null
         }
 
         $Server.Execute($tmsl)
         $Server.Databases.Refresh()
 
-        $deployedDb = $Server.Databases.FindByName($Name)
+        $deployedDatabase = $Server.Databases.FindByName($Name)
 
-        if ($null -eq $deployedDb) {
-            throw "Deployment completed but database '$Name' was not found after refresh."
+        if ($null -eq $deployedDatabase) {
+            throw "Deployment completed but database '$Name' could not be found after refresh."
         }
 
-        $deployedDb.Refresh()
+        $deployedDatabase.Refresh()
 
-        if ($null -eq $deployedDb.Model) {
+        if ($null -eq $deployedDatabase.Model) {
             throw "Database '$Name' found but model is null after deployment."
         }
 
-        Write-Log "Database deployed successfully: $Name" "SUCCESS"
+        Write-Log "Database deployed successfully: $Name" -Level "SUCCESS"
         $script:ChangesMade += "Created/Replaced database: $Name"
 
-        return $deployedDb
+        return $deployedDatabase
     }
     catch {
         Add-Error "TMSL deployment failed: $($_.Exception.Message)"
@@ -217,28 +277,42 @@ function Deploy-Database {
 
 Write-Host ""
 Write-Host "============================================================"
-Write-Host "        SSAS Tabular BIM Deployment"
+Write-Host "              SSAS Tabular BIM Deployment"
 Write-Host "============================================================"
 
-Write-Log "Environment : $Environment"
-Write-Log "SSAS Server : $SsasServer"
-Write-Log "Database    : $DatabaseName"
-Write-Log "BIM Path    : $BimPath"
-Write-Log "WhatIf      : $WhatIf"
+Write-Log "Deployment started at: $script:DeploymentStartTime" -Level "INFO"
+
+if ($WhatIf) {
+    Write-Log "WHATIF MODE: No actual deployment changes will be made" -Level "WARNING"
+}
+
+Write-Step "1" "Deployment Configuration"
+Write-Host "- BIM Path                 : $BimPath" -ForegroundColor $Colors.White
+Write-Host "- Environment              : $Environment" -ForegroundColor $Colors.White
+Write-Host "- SSAS Server              : $SsasServer" -ForegroundColor $Colors.White
+Write-Host "- Database                 : $DatabaseName" -ForegroundColor $Colors.White
+Write-Host "- Create If Not Exists     : $CreateDatabaseIfNotExists" -ForegroundColor $Colors.White
+Write-Host "- WhatIf                   : $WhatIf" -ForegroundColor $Colors.White
 
 $server = $null
 
 try {
-    Write-Step "1" "Loading Analysis Services Libraries"
     if (-not (Initialize-AnalysisServicesLibraries)) {
         exit 1
     }
 
     $database = Get-DatabaseFromBim -Path $BimPath
+
     Update-DatabaseIdentity -Database $database -Name $DatabaseName
 
     $server = Connect-SsasServer -ServerName $SsasServer
-    $deployedDb = Deploy-Database -Server $server -Database $database -Name $DatabaseName
+
+    Test-DatabaseDeploymentAllowed -Server $server -Name $DatabaseName
+
+    $deployedDatabase = Invoke-DatabaseDeployment `
+        -Server $server `
+        -Database $database `
+        -Name $DatabaseName
 }
 catch {
     Add-Error "Deployment failed: $($_.Exception.Message)"
@@ -246,16 +320,17 @@ catch {
 finally {
     if ($server -and $server.Connected) {
         $server.Disconnect()
-        Write-Log "Disconnected from SSAS server" "INFO"
+        Write-Log "Disconnected from SSAS server" -Level "INFO"
     }
 }
 
-$duration = (Get-Date) - $script:DeploymentStartTime
+$script:DeploymentEndTime = Get-Date
+$duration = $script:DeploymentEndTime - $script:DeploymentStartTime
 
 Write-Section "Deployment Results"
 
 if ($script:Errors.Count -gt 0) {
-    Write-Log "Deployment FAILED with $($script:Errors.Count) error(s)" "ERROR"
+    Write-Log "Deployment FAILED with $($script:Errors.Count) error(s)" -Level "ERROR"
 
     Write-Host ""
     Write-Host "ERRORS:" -ForegroundColor $Colors.Red
@@ -266,21 +341,30 @@ if ($script:Errors.Count -gt 0) {
     exit 1
 }
 
-Write-Log "Deployment completed successfully" "SUCCESS"
+Write-Log "Deployment completed successfully" -Level "SUCCESS"
 
 Write-Host ""
 Write-Host "Summary:" -ForegroundColor $Colors.Green
-Write-Host "  Environment : $Environment" -ForegroundColor $Colors.Green
-Write-Host "  Server      : $SsasServer" -ForegroundColor $Colors.Green
-Write-Host "  Database    : $DatabaseName" -ForegroundColor $Colors.Green
-Write-Host "  BIM Path    : $BimPath" -ForegroundColor $Colors.Green
-Write-Host "  Duration    : $($duration.ToString('mm\:ss'))" -ForegroundColor $Colors.Green
+Write-Host "  Environment          : $Environment" -ForegroundColor $Colors.Green
+Write-Host "  Server               : $SsasServer" -ForegroundColor $Colors.Green
+Write-Host "  Database             : $DatabaseName" -ForegroundColor $Colors.Green
+Write-Host "  BIM Path             : $BimPath" -ForegroundColor $Colors.Green
+Write-Host "  Create If Not Exists : $CreateDatabaseIfNotExists" -ForegroundColor $Colors.Green
+Write-Host "  Duration             : $($duration.ToString('mm\:ss'))" -ForegroundColor $Colors.Green
 
 if ($script:ChangesMade.Count -gt 0) {
     Write-Host ""
     Write-Host "Changes Made:" -ForegroundColor $Colors.Cyan
     $script:ChangesMade | ForEach-Object {
         Write-Host " - $_" -ForegroundColor $Colors.Green
+    }
+}
+
+if ($script:Warnings.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Warnings:" -ForegroundColor $Colors.Yellow
+    $script:Warnings | ForEach-Object {
+        Write-Host " - $_" -ForegroundColor $Colors.Yellow
     }
 }
 
