@@ -1,1 +1,7 @@
 -BimPath "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/model/Wealth.bim" -Environment "$(Environment)" -SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -CreateDatabaseIfNotExists "$(CreateDatabaseIfNotExists)"
+
+datasource:
+release -
+-SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -DatasourcesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/datasources/$(Environment).yml"
+test  -
+-SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -DatasourcesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/datasources/$(Environment).yml" -DryRun
