@@ -1,11 +1,18 @@
 param(
-    [Parameter(Mandatory=$true, Position=0)]
+    [Parameter(Mandatory = $true, Position = 0)]
+    [ValidateScript({ Test-Path $_ -PathType Leaf })]
+    [string]$BimPath,
+
+    [Parameter(Mandatory = $true, Position = 1)]
+    [ValidateSet("DEV", "UAT", "PROD")]
+    [string]$Environment,
+
+    [Parameter(Mandatory = $true, Position = 2)]
     [ValidateScript({ Test-Path $_ -PathType Leaf })]
     [string]$DatasourcesConfigFile,
 
-    [Parameter(Mandatory=$true, Position=1)]
-    [ValidateSet("DEV", "UAT", "PROD")]
-    [string]$Environment
+    [Parameter(Mandatory = $false)]
+    [switch]$StrictMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +34,6 @@ function Write-Log {
         [string]$Level = "INFO"
     )
 
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $color = $Colors.White
 
     switch ($Level) {
@@ -45,23 +51,23 @@ function Write-Section {
     param([string]$Title)
 
     Write-Host ""
-    Write-Host "======================================================================"
-    Write-Host "  $Title"
-    Write-Host "======================================================================"
+    Write-Host "============================================================"
+    Write-Host " $Title"
+    Write-Host "============================================================"
 }
 
 function Add-ValidationError {
     param([string]$Message)
 
     $script:ValidationErrors += $Message
-    Write-Log "ERROR: $Message" -Level "ERROR"
+    Write-Log $Message "ERROR"
 }
 
 function Add-ValidationWarning {
     param([string]$Message)
 
     $script:ValidationWarnings += $Message
-    Write-Log "WARNING: $Message" -Level "WARNING"
+    Write-Log $Message "WARNING"
 }
 
 function Initialize-YamlModule {
@@ -69,13 +75,12 @@ function Initialize-YamlModule {
 
     try {
         if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
-            Write-Log "powershell-yaml module not found. Installing..." -Level "WARNING"
             Install-Module -Name powershell-yaml -Scope CurrentUser -Force -ErrorAction Stop
-            Write-Log "Installed powershell-yaml module" -Level "SUCCESS"
+            Write-Log "Installed powershell-yaml module" "SUCCESS"
         }
 
         Import-Module -Name powershell-yaml -Force -ErrorAction Stop
-        Write-Log "Loaded powershell-yaml module" -Level "SUCCESS"
+        Write-Log "Loaded powershell-yaml module" "SUCCESS"
         return $true
     }
     catch {
@@ -84,176 +89,198 @@ function Initialize-YamlModule {
     }
 }
 
-function Test-YamlSyntax {
+function Read-BimModel {
     param([string]$Path)
 
-    Write-Section "Step 2: YAML Syntax Validation"
+    Write-Section "Step 2: BIM File Validation"
 
     try {
-        $content = Get-Content $Path -Raw -ErrorAction Stop
+        $json = Get-Content $Path -Raw -Encoding UTF8
+        $bim = $json | ConvertFrom-Json -ErrorAction Stop
 
-        if ([string]::IsNullOrWhiteSpace($content)) {
-            Add-ValidationError "Datasource YAML file is empty"
-            return $false
+        if (-not $bim.name) {
+            Add-ValidationError "BIM root property 'name' is missing."
+            return $null
         }
 
-        $yamlData = $content | ConvertFrom-Yaml -ErrorAction Stop
-
-        if (-not $yamlData) {
-            Add-ValidationError "Datasource YAML could not be parsed"
-            return $false
+        if (-not $bim.model) {
+            Add-ValidationError "BIM root property 'model' is missing."
+            return $null
         }
 
-        Write-Log "YAML syntax is valid" -Level "SUCCESS"
-        return $yamlData
+        if (-not $bim.model.dataSources -or $bim.model.dataSources.Count -eq 0) {
+            Add-ValidationError "BIM model has no datasources defined."
+            return $null
+        }
+
+        Write-Log "BIM file validated successfully" "SUCCESS"
+        Write-Log "Model Name: $($bim.name)" "INFO"
+        Write-Log "Datasources found in BIM: $($bim.model.dataSources.Count)" "INFO"
+
+        return $bim
     }
     catch {
-        Add-ValidationError "Invalid YAML syntax: $($_.Exception.Message)"
-        return $false
+        Add-ValidationError "Failed to read or parse BIM file: $($_.Exception.Message)"
+        return $null
     }
 }
 
-function Test-Environment {
+function Read-DatasourceConfig {
     param(
-        [object]$YamlData,
+        [string]$Path,
         [string]$ExpectedEnvironment
     )
 
-    Write-Section "Step 3: Environment Validation"
+    Write-Section "Step 3: Datasource YAML Validation"
 
-    if (-not $YamlData.environment) {
-        Add-ValidationError "Missing required property: environment"
+    try {
+        $yaml = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Yaml
+
+        if (-not $yaml) {
+            Add-ValidationError "Datasource YAML file is empty or invalid."
+            return $null
+        }
+
+        if (-not $yaml.environment) {
+            Add-ValidationError "Datasource YAML is missing 'environment' property."
+            return $null
+        }
+
+        if ($yaml.environment.ToString().ToUpper() -ne $ExpectedEnvironment.ToUpper()) {
+            Add-ValidationError "Environment mismatch. YAML has '$($yaml.environment)', expected '$ExpectedEnvironment'."
+            return $null
+        }
+
+        if (-not $yaml.datasources -or $yaml.datasources.Count -eq 0) {
+            Add-ValidationError "Datasource YAML has no 'datasources' entries."
+            return $null
+        }
+
+        foreach ($ds in $yaml.datasources) {
+            if ([string]::IsNullOrWhiteSpace($ds.name)) {
+                Add-ValidationError "Datasource entry is missing 'name'."
+            }
+
+            if ([string]::IsNullOrWhiteSpace($ds.server)) {
+                Add-ValidationError "Datasource '$($ds.name)' is missing 'server'."
+            }
+
+            if ([string]::IsNullOrWhiteSpace($ds.database)) {
+                Add-ValidationError "Datasource '$($ds.name)' is missing 'database'."
+            }
+        }
+
+        $names = @($yaml.datasources | ForEach-Object { $_.name.Trim().ToLower() })
+        $duplicates = $names | Group-Object | Where-Object { $_.Count -gt 1 }
+
+        if ($duplicates) {
+            Add-ValidationError "Duplicate datasource names found in YAML: $($duplicates.Name -join ', ')"
+        }
+
+        if ($script:ValidationErrors.Count -gt 0) {
+            return $null
+        }
+
+        Write-Log "Datasource YAML validated successfully" "SUCCESS"
+        Write-Log "Environment: $($yaml.environment)" "INFO"
+        Write-Log "Datasources found in YAML: $($yaml.datasources.Count)" "INFO"
+
+        return $yaml
+    }
+    catch {
+        Add-ValidationError "Failed to read or parse datasource YAML: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Test-DatasourceSync {
+    param(
+        [object]$Bim,
+        [object]$Yaml
+    )
+
+    Write-Section "Step 4: Datasource Sync Validation"
+
+    $bimDatasourceNames = @($Bim.model.dataSources | ForEach-Object { $_.name.Trim() })
+    $yamlDatasourceNames = @($Yaml.datasources | ForEach-Object { $_.name.Trim() })
+
+    $bimDatasourceNamesLower = @($bimDatasourceNames | ForEach-Object { $_.ToLower() })
+    $yamlDatasourceNamesLower = @($yamlDatasourceNames | ForEach-Object { $_.ToLower() })
+
+    foreach ($yamlName in $yamlDatasourceNames) {
+        if ($yamlName.ToLower() -notin $bimDatasourceNamesLower) {
+            Add-ValidationError "Datasource defined in YAML but missing in BIM: $yamlName"
+        }
+    }
+
+    foreach ($bimName in $bimDatasourceNames) {
+        if ($bimName.ToLower() -notin $yamlDatasourceNamesLower) {
+            Add-ValidationError "Datasource exists in BIM but missing in YAML: $bimName"
+        }
+    }
+
+    if ($script:ValidationErrors.Count -gt 0) {
         return $false
     }
 
-    if ($YamlData.environment -ne $ExpectedEnvironment) {
-        Add-ValidationError "Environment mismatch: '$($YamlData.environment)' found, expected '$ExpectedEnvironment'"
-        return $false
-    }
-
-    Write-Log "Environment validated: $ExpectedEnvironment" -Level "SUCCESS"
+    Write-Log "Datasource names are in sync between BIM and YAML" "SUCCESS"
     return $true
 }
 
-function Test-DatasourceCollection {
-    param([object]$YamlData)
+function Test-DatasourceConfigValues {
+    param([object]$Yaml)
 
-    Write-Section "Step 4: Datasource Collection Validation"
+    Write-Section "Step 5: Datasource Value Validation"
 
-    if (-not $YamlData.datasources) {
-        Add-ValidationError "Missing required property: datasources"
-        return $false
+    foreach ($ds in $Yaml.datasources) {
+        Write-Log "Validating datasource: $($ds.name)" "INFO"
+
+        if ($ds.server -match "localhost|127\.0\.0\.1") {
+            Add-ValidationError "Datasource '$($ds.name)' points to local server '$($ds.server)'. This is not allowed for shared environments."
+        }
+
+        if ($Environment -eq "PROD" -and $ds.server -match "DEV|UAT|DWD|UWD") {
+            Add-ValidationWarning "PROD datasource '$($ds.name)' server value looks non-production: $($ds.server)"
+        }
+
+        if ($Environment -eq "UAT" -and $ds.server -match "DEV|DWD") {
+            Add-ValidationWarning "UAT datasource '$($ds.name)' server value looks development-like: $($ds.server)"
+        }
+
+        Write-Log "Datasource '$($ds.name)' validated" "SUCCESS"
     }
 
-    if ($YamlData.datasources.Count -eq 0) {
-        Add-ValidationError "No datasources defined in configuration"
-        return $false
-    }
-
-    Write-Log "Datasource count: $($YamlData.datasources.Count)" -Level "SUCCESS"
     return $true
 }
 
-function Test-DuplicateDatasourceNames {
-    param([array]$Datasources)
+Write-Section "SSAS Datasource Configuration Validation"
 
-    Write-Section "Step 5: Duplicate Datasource Validation"
-
-    $datasourceNames = $Datasources | ForEach-Object { $_.name.Trim().ToLower() }
-    $duplicates = $datasourceNames | Group-Object | Where-Object Count -gt 1
-
-    if ($duplicates) {
-        Add-ValidationError "Duplicate datasource names found: $($duplicates.Name -join ', ')"
-        return $false
-    }
-
-    Write-Log "No duplicate datasource names found" -Level "SUCCESS"
-    return $true
-}
-
-function Test-DatasourceProperties {
-    param([array]$Datasources)
-
-    Write-Section "Step 6: Datasource Property Validation"
-
-    $isValid = $true
-
-    foreach ($datasource in $Datasources) {
-        Write-Log "Validating datasource: $($datasource.name)" -Level "INFO"
-
-        if ([string]::IsNullOrWhiteSpace($datasource.name)) {
-            Add-ValidationError "Datasource name is missing"
-            $isValid = $false
-            continue
-        }
-
-        if ([string]::IsNullOrWhiteSpace($datasource.server)) {
-            Add-ValidationError "Datasource '$($datasource.name)' is missing server"
-            $isValid = $false
-        }
-
-        if ([string]::IsNullOrWhiteSpace($datasource.database)) {
-            Add-ValidationError "Datasource '$($datasource.name)' is missing database"
-            $isValid = $false
-        }
-
-        if ($datasource.server -and $datasource.server -notmatch '^[a-zA-Z0-9\.\-_]+$') {
-            Add-ValidationWarning "Datasource '$($datasource.name)' server name contains unusual characters: $($datasource.server)"
-        }
-
-        Write-Log "Datasource validated: $($datasource.name)" -Level "SUCCESS"
-    }
-
-    return $isValid
-}
-
-Write-Host ""
-Write-Host "======================================================================"
-Write-Host "              SSAS Datasource Configuration Validation"
-Write-Host "======================================================================"
-
-Write-Log "Starting validation for: $DatasourcesConfigFile"
-Write-Log "Expected Environment: $Environment"
-
-$allPassed = $true
+Write-Log "BIM Path: $BimPath" "INFO"
+Write-Log "Datasource Config File: $DatasourcesConfigFile" "INFO"
+Write-Log "Environment: $Environment" "INFO"
+Write-Log "Strict Mode: $StrictMode" "INFO"
 
 if (-not (Initialize-YamlModule)) {
-    $allPassed = $false
+    exit 1
 }
 
-$yamlData = $null
-
-if ($allPassed) {
-    $yamlData = Test-YamlSyntax -Path $DatasourcesConfigFile
-    if (-not $yamlData) {
-        $allPassed = $false
-    }
+$bim = Read-BimModel -Path $BimPath
+if (-not $bim) {
+    exit 1
 }
 
-if ($allPassed) {
-    if (-not (Test-Environment -YamlData $yamlData -ExpectedEnvironment $Environment)) {
-        $allPassed = $false
-    }
-
-    if (-not (Test-DatasourceCollection -YamlData $yamlData)) {
-        $allPassed = $false
-    }
-
-    if ($allPassed) {
-        if (-not (Test-DuplicateDatasourceNames -Datasources $yamlData.datasources)) {
-            $allPassed = $false
-        }
-
-        if (-not (Test-DatasourceProperties -Datasources $yamlData.datasources)) {
-            $allPassed = $false
-        }
-    }
+$yaml = Read-DatasourceConfig -Path $DatasourcesConfigFile -ExpectedEnvironment $Environment
+if (-not $yaml) {
+    exit 1
 }
+
+Test-DatasourceSync -Bim $bim -Yaml $yaml | Out-Null
+Test-DatasourceConfigValues -Yaml $yaml | Out-Null
 
 Write-Section "Validation Results"
 
 if ($script:ValidationErrors.Count -gt 0) {
-    Write-Log "Validation FAILED with $($script:ValidationErrors.Count) error(s)" -Level "ERROR"
+    Write-Log "Datasource validation FAILED with $($script:ValidationErrors.Count) error(s)." "ERROR"
 
     Write-Host ""
     Write-Host "ERRORS:" -ForegroundColor $Colors.Red
@@ -264,8 +291,20 @@ if ($script:ValidationErrors.Count -gt 0) {
     exit 1
 }
 
+if ($script:ValidationWarnings.Count -gt 0 -and $StrictMode) {
+    Write-Log "Datasource validation FAILED because StrictMode treats warnings as errors." "ERROR"
+
+    Write-Host ""
+    Write-Host "WARNINGS:" -ForegroundColor $Colors.Yellow
+    $script:ValidationWarnings | ForEach-Object {
+        Write-Host " - $_" -ForegroundColor $Colors.Yellow
+    }
+
+    exit 1
+}
+
 if ($script:ValidationWarnings.Count -gt 0) {
-    Write-Log "Validation PASSED with $($script:ValidationWarnings.Count) warning(s)" -Level "WARNING"
+    Write-Log "Datasource validation PASSED with $($script:ValidationWarnings.Count) warning(s)." "WARNING"
 
     Write-Host ""
     Write-Host "WARNINGS:" -ForegroundColor $Colors.Yellow
@@ -274,13 +313,14 @@ if ($script:ValidationWarnings.Count -gt 0) {
     }
 }
 else {
-    Write-Log "Validation PASSED - no errors or warnings" -Level "SUCCESS"
+    Write-Log "Datasource validation PASSED - no errors or warnings." "SUCCESS"
 }
 
 Write-Host ""
 Write-Host "Summary:" -ForegroundColor $Colors.Green
-Write-Host "  Config File : $DatasourcesConfigFile" -ForegroundColor $Colors.Green
-Write-Host "  Environment : $Environment" -ForegroundColor $Colors.Green
-Write-Host "  Datasources : $($yamlData.datasources.Count)" -ForegroundColor $Colors.Green
+Write-Host " - Environment: $Environment" -ForegroundColor $Colors.Green
+Write-Host " - BIM Datasources: $($bim.model.dataSources.Count)" -ForegroundColor $Colors.Green
+Write-Host " - YAML Datasources: $($yaml.datasources.Count)" -ForegroundColor $Colors.Green
+Write-Host " - BIM Modified: No" -ForegroundColor $Colors.Green
 
 exit 0
