@@ -14,3 +14,13 @@ Release:
 
 Test:
 -SsasServer "$(SsasServer)" -DatabaseName "$(DatabaseName)" -Environment "$(Environment)" -RolesConfigFile "$(System.DefaultWorkingDirectory)/Wealth-Cube-Build/cube-artifact/config/roles/dev.yml" -DryRun
+
+
+Processing:--
+
+Release:
+Arguments:
+-SsasServer "$(ssasServer)" -DatabaseName "$(databaseName)" -ProcessType "$(processType)"
+
+DryRun:
+-SsasServer "$(ssasServer)" -DatabaseName "$(databaseName)" -ProcessType "$(processType)" -DryRun
